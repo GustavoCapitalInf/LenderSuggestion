@@ -522,7 +522,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -567,6 +567,21 @@ class _Handler(BaseHTTPRequestHandler):
                 jobs.append(entry)
             self._send(200, {"total": len(jobs), "jobs": jobs})
 
+        else:
+            self._send(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        path = self.path.rstrip("/")
+        if path.startswith("/job/"):
+            client_id = path[len("/job/"):]
+            job_dir = JOBS_DIR / client_id
+            if not job_dir.is_dir():
+                self._send(404, {"error": f"no job found for client_id '{client_id}'"})
+                return
+            import shutil
+            shutil.rmtree(job_dir)
+            print(f"[{client_id}] job deleted")
+            self._send(200, {"client_id": client_id, "deleted": True})
         else:
             self._send(404, {"error": "not found"})
 
