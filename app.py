@@ -477,13 +477,17 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 # Job directory helpers
 # ---------------------------------------------------------------------------
 def _job_status(job_dir: Path) -> str:
+    has_app = (job_dir / "app.json").exists()
+    has_bs  = (job_dir / "bs.json").exists()
     if (job_dir / "result.json").exists():
         return "complete"
     if (job_dir / "error.json").exists():
         return "error"
-    if (job_dir / "bs.json").exists():
+    if has_app and has_bs:
         return "processing"
-    if (job_dir / "app.json").exists():
+    if has_bs and not has_app:
+        return "waiting_for_application"
+    if has_app and not has_bs:
         return "waiting_for_bank_statement"
     return "unknown"
 
@@ -544,6 +548,24 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, json.loads((job_dir / "error.json").read_text()))
             else:
                 self._send(200, {"client_id": client_id, "status": status})
+
+        elif path == "/jobs":
+            jobs = []
+            for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
+                if not job_dir.is_dir():
+                    continue
+                status = _job_status(job_dir)
+                entry = {"client_id": job_dir.name, "status": status}
+                if status == "complete":
+                    try:
+                        result = json.loads((job_dir / "result.json").read_text())
+                        entry["qualifying_lenders"] = len(result.get("qualifying_lenders", []))
+                        entry["timestamp"] = result.get("timestamp")
+                        entry["industry"] = result.get("applicant", {}).get("industry")
+                    except Exception:
+                        pass
+                jobs.append(entry)
+            self._send(200, {"total": len(jobs), "jobs": jobs})
 
         else:
             self._send(404, {"error": "not found"})
