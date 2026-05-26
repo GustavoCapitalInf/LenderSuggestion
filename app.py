@@ -48,7 +48,10 @@ BASE_DIR = Path(__file__).parent
 JOBS_DIR = BASE_DIR / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
-API_PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 8503
+API_PORT = int(
+    os.environ.get("PORT")
+    or (sys.argv[sys.argv.index("--port") + 1] if "--port" in sys.argv else 8503)
+)
 
 POWER_AUTOMATE_URL = (
     "https://default87067de17bff468994aa610cdb27ba.92.environment.api.powerplatform.com:443"
@@ -567,11 +570,24 @@ class _Handler(BaseHTTPRequestHandler):
             job_dir = JOBS_DIR / client_id
             job_dir.mkdir(parents=True, exist_ok=True)
             (job_dir / "app.json").write_text(json.dumps(data))
-            # Clear any previous bank statement / result for this client so a re-submission is clean
-            for stale in ("bs.json", "result.json", "error.json"):
+            # Clear any previous result so a re-submission starts fresh
+            for stale in ("result.json", "error.json"):
                 (job_dir / stale).unlink(missing_ok=True)
             print(f"[{client_id}] application received")
-            self._send(200, {"client_id": client_id, "status": "received"})
+
+            # If bank statement already arrived first, trigger analysis now
+            if (job_dir / "bs.json").exists():
+                print(f"[{client_id}] bank statement already present — launching analysis")
+                bs_raw = json.loads((job_dir / "bs.json").read_text())
+                threading.Thread(
+                    target=run_analysis,
+                    args=(client_id, data, bs_raw),
+                    daemon=True,
+                ).start()
+                self._send(200, {"client_id": client_id, "status": "processing",
+                                 "poll": f"GET /job/{client_id}"})
+            else:
+                self._send(200, {"client_id": client_id, "status": "received"})
 
         elif path == "/bank-statement":
             if not GEMINI_API_KEY:
@@ -583,25 +599,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             job_dir = JOBS_DIR / client_id
-            if not job_dir.is_dir() or not (job_dir / "app.json").exists():
-                self._send(404, {"error": f"no application found for client_id '{client_id}'"})
-                return
-
+            job_dir.mkdir(parents=True, exist_ok=True)
             (job_dir / "bs.json").write_text(json.dumps(data))
-            print(f"[{client_id}] bank statement received — launching analysis")
+            print(f"[{client_id}] bank statement received")
 
-            app_raw = json.loads((job_dir / "app.json").read_text())
-            threading.Thread(
-                target=run_analysis,
-                args=(client_id, app_raw, data),
-                daemon=True,
-            ).start()
-
-            self._send(200, {
-                "client_id": client_id,
-                "status": "processing",
-                "poll": f"GET /job/{client_id}",
-            })
+            # If application already arrived, trigger analysis now
+            if (job_dir / "app.json").exists():
+                print(f"[{client_id}] application already present — launching analysis")
+                app_raw = json.loads((job_dir / "app.json").read_text())
+                threading.Thread(
+                    target=run_analysis,
+                    args=(client_id, app_raw, data),
+                    daemon=True,
+                ).start()
+                self._send(200, {"client_id": client_id, "status": "processing",
+                                 "poll": f"GET /job/{client_id}"})
+            else:
+                self._send(200, {"client_id": client_id, "status": "waiting_for_application"})
 
         else:
             self._send(404, {"error": "unknown endpoint"})
