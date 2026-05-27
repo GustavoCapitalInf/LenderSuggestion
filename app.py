@@ -96,7 +96,7 @@ LENDERS = {
         "pos": "1",
         "min_deposits": 5,
         "ownership_min_pct": None,
-        "restrictions": "NO TRUCKING / 650 credit 5 years TIB / EMAIL ONLY FOR RENEWALS",
+        "restrictions": "NO TRUCKING / 650 credit 3 years TIB / EMAIL ONLY FOR RENEWALS",
         "submission_email": "leland.white@channelpartnersllc.com",
         "contact": "Leland White — 952-960-8399",
     },
