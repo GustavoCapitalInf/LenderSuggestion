@@ -360,6 +360,7 @@ restrictions      : Industry or state bans. null = none.
 2. For remaining criteria: PASS, FAIL, or BORDERLINE (within 10% of threshold).
 3. null = automatic PASS.
 4. Rank qualifying lenders best-fit first (most criteria comfortably exceeded).
+5. qualifying_lenders MUST contain every lender whose overall is QUALIFIES — no omissions. The count must match exactly.
 
 === REQUIRED JSON OUTPUT STRUCTURE ===
 {{
