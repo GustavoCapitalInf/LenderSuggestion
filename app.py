@@ -320,9 +320,9 @@ def _format_start_date(raw: str) -> str | None:
     try:
         parts = raw.replace("-", "/").split("/")
         if len(parts) == 2:          # MM/YYYY
-            return f"{parts[0].zfill(2)}/01/{parts[1]}"
+            return f"{parts[1]}/{parts[0].zfill(2)}/01"
         if len(parts) == 3:          # MM/DD/YYYY
-            return f"{parts[0].zfill(2)}/{parts[1].zfill(2)}/{parts[2]}"
+            return f"{parts[2]}/{parts[0].zfill(2)}/{parts[1].zfill(2)}"
     except Exception:
         pass
     return raw
