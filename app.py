@@ -494,7 +494,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
         gemini_json = json.loads(response.text)
 
         result = {
-            "job_id": job_id,
+            "clientCode": job_id,
             "status": "complete",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "application_data": _map_orbit_fields(app_raw),
@@ -524,7 +524,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 
     except Exception as exc:
         error = {
-            "job_id": job_id,
+            "clientCode": job_id,
             "status": "error",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(exc),
