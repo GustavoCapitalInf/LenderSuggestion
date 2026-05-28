@@ -444,6 +444,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             "job_id": job_id,
             "status": "complete",
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "application_data": app_raw,
             "applicant": {
                 "industry": app.get("industry", "Not specified"),
                 "state": app.get("state", "Not provided"),
