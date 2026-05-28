@@ -653,6 +653,14 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 
         gemini_json = json.loads(response.text)
 
+        # Fill in any missing full_name from the lender pool
+        for entry in gemini_json.get("qualifying_lenders", []):
+            if not entry.get("full_name"):
+                entry["full_name"] = LENDERS.get(entry.get("code", ""), {}).get("full_name", entry.get("code", ""))
+        for entry in gemini_json.get("lender_evaluations", []):
+            if not entry.get("full_name"):
+                entry["full_name"] = LENDERS.get(entry.get("code", ""), {}).get("full_name", entry.get("code", ""))
+
         result = {
             "clientCode": job_id,
             "status": "complete",
