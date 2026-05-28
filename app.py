@@ -287,6 +287,31 @@ def parse_ocr_app_json(raw: dict) -> dict:
     return result
 
 
+_STATE_ABBREVS = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC",
+}
+
+def _normalize_state(raw: str) -> str | None:
+    if not raw:
+        return None
+    s = raw.strip()
+    if len(s) == 2:
+        return s.upper()
+    return _STATE_ABBREVS.get(s.lower())
+
+
 def _normalize_entity_type(raw_entity: str) -> str | None:
     """Normalize Entity_Type1 to a standard code."""
     if not raw_entity:
@@ -415,7 +440,7 @@ def _map_orbit_fields(raw: dict) -> dict:
         "dba":               _get("Doing_Business_As_DBA"),
         "address":           _get("Business_Address"),
         "businessCity":      _get("Business_City"),
-        "state":             _get("Business_State", "business_state"),
+        "state":             _normalize_state(_get("Business_State", "business_state") or ""),
         "zip":               _get("Business_Zip", "business_zip"),
         "phone":             _get("Business_Phone"),
         "businessEmail":     _get("Business_Email"),
