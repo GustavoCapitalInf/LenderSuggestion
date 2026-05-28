@@ -312,6 +312,22 @@ def _normalize_state(raw: str) -> str | None:
     return _STATE_ABBREVS.get(s.lower())
 
 
+def _format_start_date(raw: str) -> str | None:
+    """Convert MM/YYYY or MM/DD/YYYY to MM-DD-YYYY for Orbit."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        parts = raw.replace("-", "/").split("/")
+        if len(parts) == 2:          # MM/YYYY
+            return f"{parts[0].zfill(2)}-01-{parts[1]}"
+        if len(parts) == 3:          # MM/DD/YYYY
+            return f"{parts[0].zfill(2)}-{parts[1].zfill(2)}-{parts[2]}"
+    except Exception:
+        pass
+    return raw
+
+
 def _normalize_entity_type(raw_entity: str) -> str | None:
     """Normalize Entity_Type1 to a standard code."""
     if not raw_entity:
@@ -444,7 +460,7 @@ def _map_orbit_fields(raw: dict) -> dict:
         "zip":               _get("Business_Zip", "business_zip"),
         "phone":             _get("Business_Phone"),
         "businessEmail":     _get("Business_Email"),
-        "businessStartDate": _get("Date_Current_Ownership_Started"),
+        "businessStartDate": _format_start_date(_get("Date_Current_Ownership_Started") or ""),
         "ein":               _get("Federal_Tax_ID"),
         # Principal Owner
         "ownerName":         _get("Principle_Owner_Name"),
