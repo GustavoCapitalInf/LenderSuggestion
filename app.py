@@ -287,6 +287,115 @@ def parse_ocr_app_json(raw: dict) -> dict:
     return result
 
 
+def _normalize_entity_type(raw_entity: str) -> str | None:
+    """Normalize Entity_Type1 to a standard code."""
+    if not raw_entity:
+        return None
+    e = raw_entity.upper().strip()
+    if "LLLP" in e or "LIMITED LIABILITY LIMITED" in e:
+        return "LLLP"
+    if "PLLC" in e or "PROFESSIONAL LIMITED LIABILITY" in e:
+        return "PLLC"
+    if "LLP" in e or "LIMITED LIABILITY PARTNERSHIP" in e:
+        return "LLP"
+    if "LLC" in e or ("LIMITED LIABILITY COMPANY" in e):
+        return "LLC"
+    if "LP" in e or "LIMITED PARTNERSHIP" in e:
+        return "LP"
+    if "S CORP" in e or "S CORPORATION" in e:
+        return "S_CORP"
+    if "C CORP" in e or "C CORPORATION" in e:
+        return "C_CORP"
+    if "SOLE PROPRIETOR" in e:
+        return "SOLE_PROP"
+    if "GENERAL PARTNERSHIP" in e or e == "GP":
+        return "GP"
+    if "CORP" in e:
+        return "CORP"
+    if "PARTNERSHIP" in e:
+        return "PARTNERSHIP"
+    if "NON PROFIT" in e or "NONPROFIT" in e or "NOT FOR PROFIT" in e:
+        return "NONPROFIT"
+    return None
+
+
+_KAPITUS_ENTITY = {
+    "LLC":         "Limited Liability Company (LLC)",
+    "PLLC":        "Professional Limited Liability Company (PLLC)",
+    "LLLP":        "Limited Liability Limited Partnership (LLLP)",
+    "LLP":         "Limited Liability Partnership (LLP)",
+    "LP":          "Limited Partnership (LP)",
+    "S_CORP":      "S Corporation (S Corp)",
+    "C_CORP":      "C Corporation (C Corp)",
+    "CORP":        "C Corporation (C Corp)",
+    "SOLE_PROP":   "Sole Proprietorship",
+    "GP":          "General Partnership (GP)",
+    "PC":          "Professional Corporation (PC)",
+    "NONPROFIT":   None,
+    "PARTNERSHIP": None,
+}
+
+_IDEA_ENTITY = {
+    "LLC":         "Limited Liability Company",
+    "PLLC":        "Limited Liability Company",
+    "LLLP":        None,
+    "LLP":         "Legal Partnership",
+    "LP":          "Limited Partnership",
+    "S_CORP":      "Corporation",
+    "C_CORP":      "Corporation",
+    "CORP":        "Corporation",
+    "SOLE_PROP":   "Sole Proprietorship",
+    "GP":          "General Partnership",
+    "PARTNERSHIP": "Legal Partnership",
+    "NONPROFIT":   "Not For Profit",
+}
+
+_CAN_ENTITY = {
+    "LLC":         "LLC",
+    "PLLC":        "LLC",
+    "LLLP":        None,
+    "LLP":         "LLP",
+    "LP":          "Limited Partnership",
+    "S_CORP":      "Corporation",
+    "C_CORP":      "Corporation",
+    "CORP":        "Corporation",
+    "SOLE_PROP":   "Sole Proprietorship",
+    "GP":          "Partnership",
+    "PARTNERSHIP": "Partnership",
+    "NONPROFIT":   "Other",
+}
+
+_CHANNEL_ENTITY = {
+    "LLC":         "LLC",
+    "PLLC":        "LLC",
+    "LLLP":        None,
+    "LLP":         "Partnership",
+    "LP":          "Partnership",
+    "S_CORP":      "S Corp",
+    "C_CORP":      "C Corp",
+    "CORP":        "C Corp",
+    "SOLE_PROP":   None,
+    "GP":          "Partnership",
+    "PARTNERSHIP": "Partnership",
+    "NONPROFIT":   "Non Profit",
+}
+
+_FORWARD_ENTITY = {
+    "LLC":         "Limited Liability Company (LLC)",
+    "PLLC":        "Limited Liability Company (LLC)",
+    "LLLP":        None,
+    "LLP":         "Limited Liability Partnership (LLP)",
+    "LP":          "Limited Partnership (LP)",
+    "S_CORP":      "Corporation",
+    "C_CORP":      "Corporation",
+    "CORP":        "Corporation",
+    "SOLE_PROP":   "Sole Proprietor",
+    "GP":          "General Partnership",
+    "PARTNERSHIP": None,
+    "NONPROFIT":   None,
+}
+
+
 def _map_orbit_fields(raw: dict) -> dict:
     """Map raw OCR field names to Orbit API names."""
     def _get(*keys):
@@ -295,6 +404,10 @@ def _map_orbit_fields(raw: dict) -> dict:
             if v is not None:
                 return v
         return None
+
+    entity_code = _normalize_entity_type(_get("Entity_Type1") or "")
+    def _entity(lender_map):
+        return lender_map.get(entity_code) if entity_code else None
 
     return {
         # Business
@@ -337,6 +450,12 @@ def _map_orbit_fields(raw: dict) -> dict:
         "requestedAmount":    _get("Requested_Funding_Amount"),
         "timeInBusiness":     _get("Time_in_Business", "time_in_business_years"),
         "industry":           _get("Industry_App", "business_description"),
+        # Entity types per lender
+        "kapitusEntityType":    _entity(_KAPITUS_ENTITY),
+        "ideaEntityType":       _entity(_IDEA_ENTITY),
+        "canEntityType":        _entity(_CAN_ENTITY),
+        "channelPartnersEntity": _entity(_CHANNEL_ENTITY),
+        "forwardEntityType":    _entity(_FORWARD_ENTITY),
     }
 
 
