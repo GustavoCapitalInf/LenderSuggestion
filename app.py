@@ -239,42 +239,47 @@ def parse_ocr_app_json(raw: dict) -> dict:
     inner = raw.get("data", raw)
     result = {}
 
-    for key in ("estimated_fico_score",):
-        val = inner.get(key)
-        if val is not None:
-            try:
-                result["fico"] = int(float(str(val).replace(",", "").strip()))
-            except (ValueError, TypeError):
-                pass
-
-    val = inner.get("ownership_percentage")
+    val = inner.get("estimated_fico_score")
     if val is not None:
         try:
-            result["ownership"] = int(float(str(val).replace("%", "").strip()))
+            result["fico"] = int(float(str(val).replace(",", "").strip()))
         except (ValueError, TypeError):
             pass
 
-    val = inner.get("time_in_business_years")
-    if val is not None:
+    ownership_raw = (
+        inner.get("ownership_percentage") or
+        inner.get("Percent_Ownership") or
+        inner.get("Principle_Ownership") or ""
+    )
+    if ownership_raw:
         try:
-            result["tib"] = float(val)
+            result["ownership"] = int(float(str(ownership_raw).replace("%", "").strip()))
         except (ValueError, TypeError):
             pass
 
-    biz = inner.get("business_description", "")
+    tib_raw = inner.get("time_in_business_years") or inner.get("Time_in_Business")
+    if tib_raw is not None:
+        try:
+            result["tib"] = float(tib_raw)
+        except (ValueError, TypeError):
+            pass
+
+    biz = inner.get("business_description") or inner.get("Industry_App") or ""
     if biz:
         result["industry"] = str(biz)
 
     state_raw = (
         inner.get("state") or inner.get("business_state") or
-        inner.get("address_state") or inner.get("state_code") or ""
+        inner.get("Business_State") or inner.get("address_state") or
+        inner.get("state_code") or ""
     )
     if state_raw:
         result["state"] = str(state_raw).strip()
 
     zip_raw = (
         inner.get("zip") or inner.get("zip_code") or
-        inner.get("postal_code") or inner.get("business_zip") or ""
+        inner.get("business_zip") or inner.get("Business_Zip") or
+        inner.get("postal_code") or ""
     )
     if zip_raw:
         result["zip"] = str(zip_raw).strip()
