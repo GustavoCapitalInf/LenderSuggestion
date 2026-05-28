@@ -287,6 +287,59 @@ def parse_ocr_app_json(raw: dict) -> dict:
     return result
 
 
+def _map_orbit_fields(raw: dict) -> dict:
+    """Map raw OCR field names to Orbit API names."""
+    def _get(*keys):
+        for k in keys:
+            v = raw.get(k)
+            if v is not None:
+                return v
+        return None
+
+    return {
+        # Business
+        "businessName":      _get("Business_Legal_Name"),
+        "dba":               _get("Doing_Business_As_DBA"),
+        "address":           _get("Business_Address"),
+        "businessCity":      _get("Business_City"),
+        "state":             _get("Business_State", "business_state"),
+        "zip":               _get("Business_Zip", "business_zip"),
+        "phone":             _get("Business_Phone"),
+        "businessEmail":     _get("Business_Email"),
+        "businessStartDate": _get("Date_Current_Ownership_Started"),
+        "ein":               _get("Federal_Tax_ID"),
+        # Principal Owner
+        "ownerName":         _get("Principle_Owner_Name"),
+        "ownershipPercent":  _get("Principle_Ownership", "Percent_Ownership", "ownership_percentage"),
+        "ownerPhone":        _get("Principle_Phone"),
+        "email":             _get("Principle_Email"),
+        "ownerAddress":      _get("Principle_Address"),
+        "ownerCity":         _get("Principle_City"),
+        "ownerState":        _get("Principle_State"),
+        "ownerZip":          _get("Principle_Zip"),
+        "ownerSSN":          _get("Principle_SSN"),
+        "ownerDOB":          _get("Principle_DOB"),
+        # Secondary Owner
+        "secondaryOwnerName":        _get("Secondary_Owner_Name"),
+        "secondaryOwnershipPercent": _get("Secondary_Ownership"),
+        "secondaryPhone":            _get("Secondary_Phone"),
+        "secondaryEmail":            _get("Secondary_Email1"),
+        "secondaryAddress":          _get("Secondary_Address"),
+        "secondaryCity":             _get("Secondary_City"),
+        "secondaryState":            _get("Secondary_State"),
+        "secondaryZip":              _get("Secondary_Zip"),
+        "secondarySSN":              _get("Secondary_SSN"),
+        "secondaryDOB":              _get("Secondary_DOB"),
+        # Financial
+        "portalMonthlyRev":   _get("Portal_Monthly_Rev", "Average_Monthly_Deposits"),
+        "portalMobile":       _get("Portal_Mobile"),
+        "portalEmail":        _get("Portal_Email"),
+        "requestedAmount":    _get("Requested_Funding_Amount"),
+        "timeInBusiness":     _get("Time_in_Business", "time_in_business_years"),
+        "industry":           _get("Industry_App", "business_description"),
+    }
+
+
 def extract_monthly_rev(bs: dict) -> float | None:
     metrics = bs.get("summary_metrics", bs)
     rev = metrics.get("total_revenue") or metrics.get("total_credits")
@@ -444,7 +497,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             "job_id": job_id,
             "status": "complete",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "application_data": app_raw,
+            "application_data": _map_orbit_fields(app_raw),
             "applicant": {
                 "industry": app.get("industry", "Not specified"),
                 "state": app.get("state", "Not provided"),
