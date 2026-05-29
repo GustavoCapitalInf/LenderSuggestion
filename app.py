@@ -775,7 +775,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif status == "error":
                 self._send(200, json.loads((job_dir / "error.json").read_text()))
             else:
-                self._send(200, {"client_id": client_id, "status": status})
+                self._send(200, {"clientCode": client_id, "status": status})
 
         elif path == "/jobs":
             jobs = []
@@ -783,7 +783,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not job_dir.is_dir():
                     continue
                 status = _job_status(job_dir)
-                entry = {"client_id": job_dir.name, "status": status}
+                entry = {"clientCode": job_dir.name, "status": status}
                 if status == "complete":
                     try:
                         result = json.loads((job_dir / "result.json").read_text())
@@ -809,7 +809,7 @@ class _Handler(BaseHTTPRequestHandler):
             import shutil
             shutil.rmtree(job_dir)
             print(f"[{client_id}] job deleted")
-            self._send(200, {"client_id": client_id, "deleted": True})
+            self._send(200, {"clientCode": client_id, "deleted": True})
         else:
             self._send(404, {"error": "not found"})
 
@@ -827,7 +827,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not GEMINI_API_KEY:
                 self._send(500, {"error": "GEMINI_API_KEY not configured"})
                 return
-            client_id = data.pop("client_id", None) if isinstance(data, dict) else None
+            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
             if not client_id:
                 self._send(400, {"error": "client_id is required"})
                 return
@@ -849,16 +849,16 @@ class _Handler(BaseHTTPRequestHandler):
                     args=(client_id, data, bs_raw),
                     daemon=True,
                 ).start()
-                self._send(200, {"client_id": client_id, "status": "processing",
+                self._send(200, {"clientCode": client_id, "status": "processing",
                                  "poll": f"GET /job/{client_id}"})
             else:
-                self._send(200, {"client_id": client_id, "status": "received"})
+                self._send(200, {"clientCode": client_id, "status": "received"})
 
         elif path == "/bank-statement":
             if not GEMINI_API_KEY:
                 self._send(500, {"error": "GEMINI_API_KEY not configured"})
                 return
-            client_id = data.pop("client_id", None) if isinstance(data, dict) else None
+            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
             if not client_id:
                 self._send(400, {"error": "client_id is required"})
                 return
@@ -877,10 +877,10 @@ class _Handler(BaseHTTPRequestHandler):
                     args=(client_id, app_raw, data),
                     daemon=True,
                 ).start()
-                self._send(200, {"client_id": client_id, "status": "processing",
+                self._send(200, {"clientCode": client_id, "status": "processing",
                                  "poll": f"GET /job/{client_id}"})
             else:
-                self._send(200, {"client_id": client_id, "status": "waiting_for_application"})
+                self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
 
         else:
             self._send(404, {"error": "unknown endpoint"})
