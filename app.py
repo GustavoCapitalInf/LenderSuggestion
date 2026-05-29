@@ -377,18 +377,18 @@ _KAPITUS_ENTITY = {
 }
 
 _IDEA_ENTITY = {
-    "LLC":         "Limited Liability Company",
-    "PLLC":        "Limited Liability Company",
+    "LLC":         "limited-liability-company",
+    "PLLC":        "limited-liability-company",
     "LLLP":        None,
-    "LLP":         "Legal Partnership",
-    "LP":          "Limited Partnership",
-    "S_CORP":      "Corporation",
-    "C_CORP":      "Corporation",
-    "CORP":        "Corporation",
-    "SOLE_PROP":   "Sole Proprietorship",
-    "GP":          "General Partnership",
-    "PARTNERSHIP": "Legal Partnership",
-    "NONPROFIT":   "Not For Profit",
+    "LLP":         "legal-partnership",
+    "LP":          "limited-partnership",
+    "S_CORP":      "corporation",
+    "C_CORP":      "corporation",
+    "CORP":        "corporation",
+    "SOLE_PROP":   "sole-proprietorship",
+    "GP":          "general-partnership",
+    "PARTNERSHIP": "legal-partnership",
+    "NONPROFIT":   "not-for-profit",
 }
 
 _CAN_ENTITY = {
