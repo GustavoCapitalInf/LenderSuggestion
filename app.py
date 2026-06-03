@@ -646,7 +646,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-2.5-flash",
             contents=build_prompt(app, bs_raw),
             config={"response_mime_type": "application/json"},
         )
