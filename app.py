@@ -462,6 +462,7 @@ def _map_orbit_fields(raw: dict) -> dict:
         "businessEmail":     _get("Business_Email"),
         "businessStartDate": _format_start_date(_get("Date_Current_Ownership_Started") or ""),
         "ein":               _get("Federal_Tax_ID"),
+        "assignedRepEmail":  _get("assignedRepEmail"),
         # Principal Owner
         "ownerName":         _get("Principle_Owner_Name"),
         "ownershipPercent":  _get("Principle_Ownership", "Percent_Ownership", "ownership_percentage"),
