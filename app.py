@@ -578,8 +578,15 @@ restrictions      : Industry or state bans. null = none.
    Match applicant State to abbreviations/names in restrictions (e.g. "NO CALI" = California).
 2. For remaining criteria: PASS, FAIL, or BORDERLINE (within 10% of threshold).
 3. null = automatic PASS.
-4. Rank qualifying lenders best-fit first (most criteria comfortably exceeded).
-5. qualifying_lenders MUST contain every lender whose overall is QUALIFIES — no omissions. The count must match exactly.
+4. Missing applicant data: if a lender's requirement for a criterion is NOT null, but the
+   applicant's actual value for that criterion is missing/unknown/not provided (e.g. deposit
+   count absent from bank statement data) — that criterion's result MUST be
+   "CONDITIONAL (data missing)" and the lender's overall MUST be "CONDITIONAL". Never PASS or
+   FAIL a criterion you cannot verify. This must be applied the same way every time — do not
+   guess or give benefit of the doubt.
+5. Rank qualifying lenders best-fit first (most criteria comfortably exceeded).
+6. qualifying_lenders MUST contain every lender whose overall is QUALIFIES — no omissions. The count must match exactly.
+   CONDITIONAL lenders are never included in qualifying_lenders.
 
 === REQUIRED JSON OUTPUT STRUCTURE ===
 {{
