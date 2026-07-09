@@ -649,7 +649,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=build_prompt(app, bs_raw),
-            config={"response_mime_type": "application/json"},
+            config={"response_mime_type": "application/json", "temperature": 0, "seed": 42},
         )
 
         gemini_json = json.loads(response.text)
