@@ -47,8 +47,6 @@ import storage
 # Config
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
-JOBS_DIR = BASE_DIR / "jobs"
-JOBS_DIR.mkdir(exist_ok=True)
 
 API_PORT = int(
     os.environ.get("PORT")
@@ -711,7 +709,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 
 
 # ---------------------------------------------------------------------------
-# Job directory helpers
+# Job status helpers
 # ---------------------------------------------------------------------------
 def _queue_counts() -> dict:
     counts = {"waiting_for_bank_statement": 0, "processing": 0, "complete": 0, "error": 0}
@@ -877,24 +875,15 @@ class _Handler(BaseHTTPRequestHandler):
 def _recover_orphaned_jobs():
     """On startup, re-run any jobs that have both documents but no result yet."""
     recovered = 0
-    for job_dir in JOBS_DIR.iterdir():
-        if not job_dir.is_dir():
-            continue
-        has_app = (job_dir / "app.json").exists()
-        has_bs = (job_dir / "bs.json").exists()
-        has_result = (job_dir / "result.json").exists()
-        has_error = (job_dir / "error.json").exists()
-        if has_app and has_bs and not has_result and not has_error:
-            client_id = job_dir.name
-            print(f"[{client_id}] recovering orphaned job — relaunching analysis")
-            app_raw = json.loads((job_dir / "app.json").read_text())
-            bs_raw = json.loads((job_dir / "bs.json").read_text())
-            threading.Thread(
-                target=run_analysis,
-                args=(client_id, app_raw, bs_raw),
-                daemon=True,
-            ).start()
-            recovered += 1
+    for job in storage.orphaned_jobs():
+        client_id = job["client_code"]
+        print(f"[{client_id}] recovering orphaned job — relaunching analysis")
+        threading.Thread(
+            target=run_analysis,
+            args=(client_id, job["app_json"], job["bs_json"]),
+            daemon=True,
+        ).start()
+        recovered += 1
     if recovered:
         print(f"==> Recovered {recovered} orphaned job(s)")
 
@@ -903,6 +892,7 @@ if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("WARNING: GEMINI_API_KEY not set. Requests will fail until it is configured.")
 
+    storage.init_db()
     _recover_orphaned_jobs()
     server = HTTPServer(("0.0.0.0", API_PORT), _Handler)
     print(f"Capital Infusion MCA Backend running on port {API_PORT}")
