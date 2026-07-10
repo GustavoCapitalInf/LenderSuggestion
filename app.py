@@ -41,6 +41,8 @@ from pathlib import Path
 
 from google import genai
 
+import storage
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -831,67 +833,61 @@ class _Handler(BaseHTTPRequestHandler):
 
         path = self.path.rstrip("/")
 
-        if path == "/application":
-            if not GEMINI_API_KEY:
-                self._send(500, {"error": "GEMINI_API_KEY not configured"})
-                return
-            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
-            if not client_id:
-                self._send(400, {"error": "client_id is required"})
-                return
+        try:
+            if path == "/application":
+                if not GEMINI_API_KEY:
+                    self._send(500, {"error": "GEMINI_API_KEY not configured"})
+                    return
+                client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
+                if not client_id:
+                    self._send(400, {"error": "client_id is required"})
+                    return
 
-            job_dir = JOBS_DIR / client_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "app.json").write_text(json.dumps(data))
-            # Clear any previous result so a re-submission starts fresh
-            for stale in ("result.json", "error.json"):
-                (job_dir / stale).unlink(missing_ok=True)
-            print(f"[{client_id}] application received")
+                storage.upsert_app(client_id, data)
+                print(f"[{client_id}] application received")
 
-            # If bank statement already arrived first, trigger analysis now
-            if (job_dir / "bs.json").exists():
-                print(f"[{client_id}] bank statement already present — launching analysis")
-                bs_raw = json.loads((job_dir / "bs.json").read_text())
-                threading.Thread(
-                    target=run_analysis,
-                    args=(client_id, data, bs_raw),
-                    daemon=True,
-                ).start()
-                self._send(200, {"clientCode": client_id, "status": "processing",
-                                 "poll": f"GET /job/{client_id}"})
+                job = storage.get_job(client_id)
+                if job["bs_json"] is not None:
+                    print(f"[{client_id}] bank statement already present — launching analysis")
+                    threading.Thread(
+                        target=run_analysis,
+                        args=(client_id, data, job["bs_json"]),
+                        daemon=True,
+                    ).start()
+                    self._send(200, {"clientCode": client_id, "status": "processing",
+                                     "poll": f"GET /job/{client_id}"})
+                else:
+                    self._send(200, {"clientCode": client_id, "status": "received"})
+
+            elif path == "/bank-statement":
+                if not GEMINI_API_KEY:
+                    self._send(500, {"error": "GEMINI_API_KEY not configured"})
+                    return
+                client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
+                if not client_id:
+                    self._send(400, {"error": "client_id is required"})
+                    return
+
+                storage.upsert_bs(client_id, data)
+                print(f"[{client_id}] bank statement received")
+
+                job = storage.get_job(client_id)
+                if job["app_json"] is not None:
+                    print(f"[{client_id}] application already present — launching analysis")
+                    threading.Thread(
+                        target=run_analysis,
+                        args=(client_id, job["app_json"], data),
+                        daemon=True,
+                    ).start()
+                    self._send(200, {"clientCode": client_id, "status": "processing",
+                                     "poll": f"GET /job/{client_id}"})
+                else:
+                    self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
+
             else:
-                self._send(200, {"clientCode": client_id, "status": "received"})
-
-        elif path == "/bank-statement":
-            if not GEMINI_API_KEY:
-                self._send(500, {"error": "GEMINI_API_KEY not configured"})
-                return
-            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
-            if not client_id:
-                self._send(400, {"error": "client_id is required"})
-                return
-
-            job_dir = JOBS_DIR / client_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "bs.json").write_text(json.dumps(data))
-            print(f"[{client_id}] bank statement received")
-
-            # If application already arrived, trigger analysis now
-            if (job_dir / "app.json").exists():
-                print(f"[{client_id}] application already present — launching analysis")
-                app_raw = json.loads((job_dir / "app.json").read_text())
-                threading.Thread(
-                    target=run_analysis,
-                    args=(client_id, app_raw, data),
-                    daemon=True,
-                ).start()
-                self._send(200, {"clientCode": client_id, "status": "processing",
-                                 "poll": f"GET /job/{client_id}"})
-            else:
-                self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
-
-        else:
-            self._send(404, {"error": "unknown endpoint"})
+                self._send(404, {"error": "unknown endpoint"})
+        except Exception as exc:
+            self._send(503, {"error": f"storage unavailable: {exc}"})
 
 
 # ---------------------------------------------------------------------------
