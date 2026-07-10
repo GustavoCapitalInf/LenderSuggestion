@@ -86,6 +86,18 @@ def test_job_status_transitions():
     print("test_job_status_transitions: PASS")
 
 
+def test_job_status_waiting_for_application():
+    cleanup()
+    storage.upsert_bs(TEST_CODE, {"b": 2})
+    assert storage.job_status(storage.get_job(TEST_CODE)) == "waiting_for_application"
+    print("test_job_status_waiting_for_application: PASS")
+
+
+def test_job_status_unknown():
+    assert storage.job_status({}) == "unknown"
+    print("test_job_status_unknown: PASS")
+
+
 def test_reupsert_app_clears_result():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
@@ -131,6 +143,8 @@ if __name__ == "__main__":
         test_set_result_and_job_status_complete()
         test_set_error_and_job_status_error()
         test_job_status_transitions()
+        test_job_status_waiting_for_application()
+        test_job_status_unknown()
         test_reupsert_app_clears_result()
         test_delete_job_rowcount_semantics()
         test_list_jobs_and_orphaned_jobs()
