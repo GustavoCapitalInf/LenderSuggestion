@@ -82,3 +82,67 @@ def get_job(client_code: str) -> dict | None:
             (client_code,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def set_result(client_code: str, result_json: dict) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET result_json = %s, updated_at = now() WHERE client_code = %s",
+            (Json(result_json), client_code),
+        )
+
+
+def set_error(client_code: str, error_json: dict) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET error_json = %s, updated_at = now() WHERE client_code = %s",
+            (Json(error_json), client_code),
+        )
+
+
+def delete_job(client_code: str) -> bool:
+    """Delete the job row. Returns True if a row was deleted, False if it didn't exist."""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM jobs WHERE client_code = %s", (client_code,))
+        return cur.rowcount > 0
+
+
+def list_jobs() -> list[dict]:
+    """All jobs, newest updated_at first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT client_code, app_json, bs_json, result_json, error_json, updated_at "
+            "FROM jobs ORDER BY updated_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def orphaned_jobs() -> list[dict]:
+    """Jobs with both app_json and bs_json present but no result/error yet
+    (used to relaunch analysis on startup after an unclean shutdown)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT client_code, app_json, bs_json, result_json, error_json, updated_at "
+            "FROM jobs "
+            "WHERE app_json IS NOT NULL AND bs_json IS NOT NULL "
+            "AND result_json IS NULL AND error_json IS NULL"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def job_status(row: dict) -> str:
+    """Derive a status string from a job row dict, mirroring the old
+    file-existence-based _job_status()."""
+    has_app = row.get("app_json") is not None
+    has_bs = row.get("bs_json") is not None
+    if row.get("result_json") is not None:
+        return "complete"
+    if row.get("error_json") is not None:
+        return "error"
+    if has_app and has_bs:
+        return "processing"
+    if has_bs and not has_app:
+        return "waiting_for_application"
+    if has_app and not has_bs:
+        return "waiting_for_bank_statement"
+    return "unknown"
