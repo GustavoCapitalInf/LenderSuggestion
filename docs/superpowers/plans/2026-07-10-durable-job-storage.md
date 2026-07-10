@@ -521,16 +521,17 @@ In `app.py`, replace the entire `do_POST` method (currently lines 817-887) with:
 Run (in the background): `python app.py --port 8503`
 Expected output includes: `Capital Infusion MCA Backend running on port 8503` (it will also print orphaned-job recovery output, ignore for now — that's Task 6).
 
-- [ ] **Step 4: Smoke-test the two endpoints against the running server**
+- [ ] **Step 4: Smoke-test the endpoint against the running server**
 
 Run:
 
 ```bash
 curl -s -X POST http://localhost:8503/application -H "Content-Type: application/json" -d '{"clientCode":"PLAN_TEST_1","Business_Legal_Name":"Test Co"}'
-curl -s http://localhost:8503/job/PLAN_TEST_1
 ```
 
-Expected: first call returns `{"clientCode": "PLAN_TEST_1", "status": "received"}`; second call returns `{"clientCode": "PLAN_TEST_1", "status": "waiting_for_bank_statement"}`.
+Expected: `{"clientCode": "PLAN_TEST_1", "status": "received"}`.
+
+Note: do NOT curl `GET /job/PLAN_TEST_1` here to check the result — `do_GET` is still file-based until Task 5, so it would 404 even though the POST succeeded. Verify storage directly instead:
 
 Then run:
 
