@@ -68,7 +68,10 @@ TEST_CODE = "STORAGE_TEST_job1"
 
 
 def cleanup():
-    storage.delete_job(TEST_CODE)
+    # storage.delete_job() doesn't exist until Task 2 — use a raw query here
+    # so this test file is self-contained within Task 1.
+    with storage._connect() as conn:
+        conn.execute("DELETE FROM jobs WHERE client_code = %s", (TEST_CODE,))
 
 
 def test_init_db_is_idempotent():
