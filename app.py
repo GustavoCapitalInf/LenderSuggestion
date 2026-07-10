@@ -646,8 +646,7 @@ def _post_webhook(payload: dict):
 
 
 def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
-    """Runs in a background thread. Writes result.json or error.json."""
-    job_dir = JOBS_DIR / job_id
+    """Runs in a background thread. Writes result/error via storage.py."""
     try:
         app = parse_ocr_app_json(app_raw)
         monthly_rev = extract_monthly_rev(bs_raw)
@@ -691,7 +690,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             **gemini_json,
         }
 
-        (job_dir / "result.json").write_text(json.dumps(result, indent=2))
+        storage.set_result(job_id, result)
         print(f"[job {job_id[:8]}] complete — {len(gemini_json.get('qualifying_lenders', []))} qualifying lenders")
 
         try:
@@ -707,7 +706,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(exc),
         }
-        (job_dir / "error.json").write_text(json.dumps(error, indent=2))
+        storage.set_error(job_id, error)
         print(f"[job {job_id[:8]}] ERROR: {exc}")
 
 
