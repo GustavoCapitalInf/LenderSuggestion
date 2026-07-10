@@ -28,6 +28,13 @@ API key
 -------
 Set GEMINI_API_KEY environment variable, or place it in .streamlit/secrets.toml:
     GEMINI_API_KEY = "..."
+
+Database
+--------
+Requires a Postgres connection string in the DATABASE_URL environment
+variable, or place it in .streamlit/secrets.toml:
+    DATABASE_URL = "postgresql://user:pass@host/dbname?sslmode=require"
+A free Neon (https://neon.tech) database works well for this.
 """
 
 import json
