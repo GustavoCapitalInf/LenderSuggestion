@@ -68,7 +68,10 @@ TEST_CODE = "STORAGE_TEST_job1"
 
 
 def cleanup():
-    storage.delete_job(TEST_CODE)
+    # storage.delete_job() doesn't exist until Task 2 — use a raw query here
+    # so this test file is self-contained within Task 1.
+    with storage._connect() as conn:
+        conn.execute("DELETE FROM jobs WHERE client_code = %s", (TEST_CODE,))
 
 
 def test_init_db_is_idempotent():
@@ -518,16 +521,17 @@ In `app.py`, replace the entire `do_POST` method (currently lines 817-887) with:
 Run (in the background): `python app.py --port 8503`
 Expected output includes: `Capital Infusion MCA Backend running on port 8503` (it will also print orphaned-job recovery output, ignore for now — that's Task 6).
 
-- [ ] **Step 4: Smoke-test the two endpoints against the running server**
+- [ ] **Step 4: Smoke-test the endpoint against the running server**
 
 Run:
 
 ```bash
 curl -s -X POST http://localhost:8503/application -H "Content-Type: application/json" -d '{"clientCode":"PLAN_TEST_1","Business_Legal_Name":"Test Co"}'
-curl -s http://localhost:8503/job/PLAN_TEST_1
 ```
 
-Expected: first call returns `{"clientCode": "PLAN_TEST_1", "status": "received"}`; second call returns `{"clientCode": "PLAN_TEST_1", "status": "waiting_for_bank_statement"}`.
+Expected: `{"clientCode": "PLAN_TEST_1", "status": "received"}`.
+
+Note: do NOT curl `GET /job/PLAN_TEST_1` here to check the result — `do_GET` is still file-based until Task 5, so it would 404 even though the POST succeeded. Verify storage directly instead:
 
 Then run:
 
@@ -605,6 +609,10 @@ def test_run_analysis_writes_result_via_storage():
         "no_qualifying_lenders": True,
         "closest_match_if_none": None,
     })
+    # set_result/set_error are UPDATE-only, not upsert — a row must already
+    # exist, exactly as it would in production (created by upsert_app/upsert_bs
+    # before run_analysis is ever invoked).
+    storage.upsert_app(TEST_CODE, {"Business_Legal_Name": "Test Co"})
     with patch.object(app, "genai") as mock_genai, patch.object(app, "_post_webhook") as mock_webhook:
         mock_genai.Client.return_value.models.generate_content.return_value = fake_response
         mock_webhook.return_value = 200
@@ -621,6 +629,7 @@ def test_run_analysis_writes_result_via_storage():
 
 def test_run_analysis_writes_error_via_storage_on_failure():
     cleanup()
+    storage.upsert_app(TEST_CODE, {"Business_Legal_Name": "Test Co"})
     with patch.object(app, "genai") as mock_genai:
         mock_genai.Client.return_value.models.generate_content.side_effect = RuntimeError("boom")
         app.run_analysis(TEST_CODE, {"Business_Legal_Name": "Test Co"}, {"total_revenue": 1000})

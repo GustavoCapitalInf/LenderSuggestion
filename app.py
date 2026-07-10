@@ -28,6 +28,13 @@ API key
 -------
 Set GEMINI_API_KEY environment variable, or place it in .streamlit/secrets.toml:
     GEMINI_API_KEY = "..."
+
+Database
+--------
+Requires a Postgres connection string in the DATABASE_URL environment
+variable, or place it in .streamlit/secrets.toml:
+    DATABASE_URL = "postgresql://user:pass@host/dbname?sslmode=require"
+A free Neon (https://neon.tech) database works well for this.
 """
 
 import json
@@ -41,12 +48,12 @@ from pathlib import Path
 
 from google import genai
 
+import storage
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
-JOBS_DIR = BASE_DIR / "jobs"
-JOBS_DIR.mkdir(exist_ok=True)
 
 API_PORT = int(
     os.environ.get("PORT")
@@ -644,8 +651,7 @@ def _post_webhook(payload: dict):
 
 
 def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
-    """Runs in a background thread. Writes result.json or error.json."""
-    job_dir = JOBS_DIR / job_id
+    """Runs in a background thread. Writes result/error via storage.py."""
     try:
         app = parse_ocr_app_json(app_raw)
         monthly_rev = extract_monthly_rev(bs_raw)
@@ -689,7 +695,7 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             **gemini_json,
         }
 
-        (job_dir / "result.json").write_text(json.dumps(result, indent=2))
+        storage.set_result(job_id, result)
         print(f"[job {job_id[:8]}] complete — {len(gemini_json.get('qualifying_lenders', []))} qualifying lenders")
 
         try:
@@ -705,37 +711,19 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(exc),
         }
-        (job_dir / "error.json").write_text(json.dumps(error, indent=2))
+        storage.set_error(job_id, error)
         print(f"[job {job_id[:8]}] ERROR: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Job directory helpers
+# Job status helpers
 # ---------------------------------------------------------------------------
-def _job_status(job_dir: Path) -> str:
-    has_app = (job_dir / "app.json").exists()
-    has_bs  = (job_dir / "bs.json").exists()
-    if (job_dir / "result.json").exists():
-        return "complete"
-    if (job_dir / "error.json").exists():
-        return "error"
-    if has_app and has_bs:
-        return "processing"
-    if has_bs and not has_app:
-        return "waiting_for_application"
-    if has_app and not has_bs:
-        return "waiting_for_bank_statement"
-    return "unknown"
-
-
-
 def _queue_counts() -> dict:
     counts = {"waiting_for_bank_statement": 0, "processing": 0, "complete": 0, "error": 0}
-    for job_dir in JOBS_DIR.iterdir():
-        if job_dir.is_dir():
-            s = _job_status(job_dir)
-            if s in counts:
-                counts[s] += 1
+    for job in storage.list_jobs():
+        s = storage.job_status(job)
+        if s in counts:
+            counts[s] += 1
     return counts
 
 
@@ -765,57 +753,57 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.rstrip("/")
 
-        if path == "/health":
-            self._send(200, {"status": "ok", "port": API_PORT, "lenders": len(LENDERS)})
+        try:
+            if path == "/health":
+                self._send(200, {"status": "ok", "port": API_PORT, "lenders": len(LENDERS)})
 
-        elif path == "/queue":
-            self._send(200, _queue_counts())
+            elif path == "/queue":
+                self._send(200, _queue_counts())
 
-        elif path.startswith("/job/"):
-            client_id = path[len("/job/"):]
-            job_dir = JOBS_DIR / client_id
-            if not job_dir.is_dir():
-                self._send(404, {"error": f"no job found for client_id '{client_id}'"})
-                return
-            status = _job_status(job_dir)
-            if status == "complete":
-                self._send(200, json.loads((job_dir / "result.json").read_text()))
-            elif status == "error":
-                self._send(200, json.loads((job_dir / "error.json").read_text()))
-            else:
-                self._send(200, {"clientCode": client_id, "status": status})
-
-        elif path == "/jobs":
-            jobs = []
-            for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
-                if not job_dir.is_dir():
-                    continue
-                status = _job_status(job_dir)
-                entry = {"clientCode": job_dir.name, "status": status}
+            elif path.startswith("/job/"):
+                client_id = path[len("/job/"):]
+                job = storage.get_job(client_id)
+                if job is None:
+                    self._send(404, {"error": f"no job found for client_id '{client_id}'"})
+                    return
+                status = storage.job_status(job)
                 if status == "complete":
-                    try:
-                        result = json.loads((job_dir / "result.json").read_text())
+                    self._send(200, job["result_json"])
+                elif status == "error":
+                    self._send(200, job["error_json"])
+                else:
+                    self._send(200, {"clientCode": client_id, "status": status})
+
+            elif path == "/jobs":
+                jobs = []
+                for job in storage.list_jobs():
+                    status = storage.job_status(job)
+                    entry = {"clientCode": job["client_code"], "status": status}
+                    if status == "complete":
+                        result = job["result_json"]
                         entry["qualifying_lenders"] = len(result.get("qualifying_lenders", []))
                         entry["timestamp"] = result.get("timestamp")
                         entry["industry"] = result.get("applicant", {}).get("industry")
-                    except Exception:
-                        pass
-                jobs.append(entry)
-            self._send(200, {"total": len(jobs), "jobs": jobs})
+                    jobs.append(entry)
+                self._send(200, {"total": len(jobs), "jobs": jobs})
 
-        else:
-            self._send(404, {"error": "not found"})
+            else:
+                self._send(404, {"error": "not found"})
+        except Exception as exc:
+            self._send(503, {"error": f"storage unavailable: {exc}"})
 
     def do_DELETE(self):
         path = self.path.rstrip("/")
         if path.startswith("/job/"):
             client_id = path[len("/job/"):]
-            job_dir = JOBS_DIR / client_id
-            if not job_dir.is_dir():
+            try:
+                deleted = storage.delete_job(client_id)
+            except Exception as exc:
+                self._send(503, {"error": f"storage unavailable: {exc}"})
+                return
+            if not deleted:
                 self._send(404, {"error": f"no job found for client_id '{client_id}'"})
                 return
-            import shutil
-            shutil.rmtree(job_dir)
             print(f"[{client_id}] job deleted")
             self._send(200, {"clientCode": client_id, "deleted": True})
         else:
@@ -831,67 +819,61 @@ class _Handler(BaseHTTPRequestHandler):
 
         path = self.path.rstrip("/")
 
-        if path == "/application":
-            if not GEMINI_API_KEY:
-                self._send(500, {"error": "GEMINI_API_KEY not configured"})
-                return
-            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
-            if not client_id:
-                self._send(400, {"error": "client_id is required"})
-                return
+        try:
+            if path == "/application":
+                if not GEMINI_API_KEY:
+                    self._send(500, {"error": "GEMINI_API_KEY not configured"})
+                    return
+                client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
+                if not client_id:
+                    self._send(400, {"error": "client_id is required"})
+                    return
 
-            job_dir = JOBS_DIR / client_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "app.json").write_text(json.dumps(data))
-            # Clear any previous result so a re-submission starts fresh
-            for stale in ("result.json", "error.json"):
-                (job_dir / stale).unlink(missing_ok=True)
-            print(f"[{client_id}] application received")
+                storage.upsert_app(client_id, data)
+                print(f"[{client_id}] application received")
 
-            # If bank statement already arrived first, trigger analysis now
-            if (job_dir / "bs.json").exists():
-                print(f"[{client_id}] bank statement already present — launching analysis")
-                bs_raw = json.loads((job_dir / "bs.json").read_text())
-                threading.Thread(
-                    target=run_analysis,
-                    args=(client_id, data, bs_raw),
-                    daemon=True,
-                ).start()
-                self._send(200, {"clientCode": client_id, "status": "processing",
-                                 "poll": f"GET /job/{client_id}"})
+                job = storage.get_job(client_id)
+                if job["bs_json"] is not None:
+                    print(f"[{client_id}] bank statement already present — launching analysis")
+                    threading.Thread(
+                        target=run_analysis,
+                        args=(client_id, data, job["bs_json"]),
+                        daemon=True,
+                    ).start()
+                    self._send(200, {"clientCode": client_id, "status": "processing",
+                                     "poll": f"GET /job/{client_id}"})
+                else:
+                    self._send(200, {"clientCode": client_id, "status": "received"})
+
+            elif path == "/bank-statement":
+                if not GEMINI_API_KEY:
+                    self._send(500, {"error": "GEMINI_API_KEY not configured"})
+                    return
+                client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
+                if not client_id:
+                    self._send(400, {"error": "client_id is required"})
+                    return
+
+                storage.upsert_bs(client_id, data)
+                print(f"[{client_id}] bank statement received")
+
+                job = storage.get_job(client_id)
+                if job["app_json"] is not None:
+                    print(f"[{client_id}] application already present — launching analysis")
+                    threading.Thread(
+                        target=run_analysis,
+                        args=(client_id, job["app_json"], data),
+                        daemon=True,
+                    ).start()
+                    self._send(200, {"clientCode": client_id, "status": "processing",
+                                     "poll": f"GET /job/{client_id}"})
+                else:
+                    self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
+
             else:
-                self._send(200, {"clientCode": client_id, "status": "received"})
-
-        elif path == "/bank-statement":
-            if not GEMINI_API_KEY:
-                self._send(500, {"error": "GEMINI_API_KEY not configured"})
-                return
-            client_id = (data.pop("clientCode", None) or data.pop("client_id", None)) if isinstance(data, dict) else None
-            if not client_id:
-                self._send(400, {"error": "client_id is required"})
-                return
-
-            job_dir = JOBS_DIR / client_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "bs.json").write_text(json.dumps(data))
-            print(f"[{client_id}] bank statement received")
-
-            # If application already arrived, trigger analysis now
-            if (job_dir / "app.json").exists():
-                print(f"[{client_id}] application already present — launching analysis")
-                app_raw = json.loads((job_dir / "app.json").read_text())
-                threading.Thread(
-                    target=run_analysis,
-                    args=(client_id, app_raw, data),
-                    daemon=True,
-                ).start()
-                self._send(200, {"clientCode": client_id, "status": "processing",
-                                 "poll": f"GET /job/{client_id}"})
-            else:
-                self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
-
-        else:
-            self._send(404, {"error": "unknown endpoint"})
+                self._send(404, {"error": "unknown endpoint"})
+        except Exception as exc:
+            self._send(503, {"error": f"storage unavailable: {exc}"})
 
 
 # ---------------------------------------------------------------------------
@@ -900,24 +882,15 @@ class _Handler(BaseHTTPRequestHandler):
 def _recover_orphaned_jobs():
     """On startup, re-run any jobs that have both documents but no result yet."""
     recovered = 0
-    for job_dir in JOBS_DIR.iterdir():
-        if not job_dir.is_dir():
-            continue
-        has_app = (job_dir / "app.json").exists()
-        has_bs = (job_dir / "bs.json").exists()
-        has_result = (job_dir / "result.json").exists()
-        has_error = (job_dir / "error.json").exists()
-        if has_app and has_bs and not has_result and not has_error:
-            client_id = job_dir.name
-            print(f"[{client_id}] recovering orphaned job — relaunching analysis")
-            app_raw = json.loads((job_dir / "app.json").read_text())
-            bs_raw = json.loads((job_dir / "bs.json").read_text())
-            threading.Thread(
-                target=run_analysis,
-                args=(client_id, app_raw, bs_raw),
-                daemon=True,
-            ).start()
-            recovered += 1
+    for job in storage.orphaned_jobs():
+        client_id = job["client_code"]
+        print(f"[{client_id}] recovering orphaned job — relaunching analysis")
+        threading.Thread(
+            target=run_analysis,
+            args=(client_id, job["app_json"], job["bs_json"]),
+            daemon=True,
+        ).start()
+        recovered += 1
     if recovered:
         print(f"==> Recovered {recovered} orphaned job(s)")
 
@@ -926,6 +899,7 @@ if __name__ == "__main__":
     if not GEMINI_API_KEY:
         print("WARNING: GEMINI_API_KEY not set. Requests will fail until it is configured.")
 
+    storage.init_db()
     _recover_orphaned_jobs()
     server = HTTPServer(("0.0.0.0", API_PORT), _Handler)
     print(f"Capital Infusion MCA Backend running on port {API_PORT}")
