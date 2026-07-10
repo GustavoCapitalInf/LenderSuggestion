@@ -609,6 +609,10 @@ def test_run_analysis_writes_result_via_storage():
         "no_qualifying_lenders": True,
         "closest_match_if_none": None,
     })
+    # set_result/set_error are UPDATE-only, not upsert — a row must already
+    # exist, exactly as it would in production (created by upsert_app/upsert_bs
+    # before run_analysis is ever invoked).
+    storage.upsert_app(TEST_CODE, {"Business_Legal_Name": "Test Co"})
     with patch.object(app, "genai") as mock_genai, patch.object(app, "_post_webhook") as mock_webhook:
         mock_genai.Client.return_value.models.generate_content.return_value = fake_response
         mock_webhook.return_value = 200
@@ -625,6 +629,7 @@ def test_run_analysis_writes_result_via_storage():
 
 def test_run_analysis_writes_error_via_storage_on_failure():
     cleanup()
+    storage.upsert_app(TEST_CODE, {"Business_Legal_Name": "Test Co"})
     with patch.object(app, "genai") as mock_genai:
         mock_genai.Client.return_value.models.generate_content.side_effect = RuntimeError("boom")
         app.run_analysis(TEST_CODE, {"Business_Legal_Name": "Test Co"}, {"total_revenue": 1000})
