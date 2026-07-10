@@ -713,30 +713,12 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 # ---------------------------------------------------------------------------
 # Job directory helpers
 # ---------------------------------------------------------------------------
-def _job_status(job_dir: Path) -> str:
-    has_app = (job_dir / "app.json").exists()
-    has_bs  = (job_dir / "bs.json").exists()
-    if (job_dir / "result.json").exists():
-        return "complete"
-    if (job_dir / "error.json").exists():
-        return "error"
-    if has_app and has_bs:
-        return "processing"
-    if has_bs and not has_app:
-        return "waiting_for_application"
-    if has_app and not has_bs:
-        return "waiting_for_bank_statement"
-    return "unknown"
-
-
-
 def _queue_counts() -> dict:
     counts = {"waiting_for_bank_statement": 0, "processing": 0, "complete": 0, "error": 0}
-    for job_dir in JOBS_DIR.iterdir():
-        if job_dir.is_dir():
-            s = _job_status(job_dir)
-            if s in counts:
-                counts[s] += 1
+    for job in storage.list_jobs():
+        s = storage.job_status(job)
+        if s in counts:
+            counts[s] += 1
     return counts
 
 
@@ -766,57 +748,57 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.rstrip("/")
 
-        if path == "/health":
-            self._send(200, {"status": "ok", "port": API_PORT, "lenders": len(LENDERS)})
+        try:
+            if path == "/health":
+                self._send(200, {"status": "ok", "port": API_PORT, "lenders": len(LENDERS)})
 
-        elif path == "/queue":
-            self._send(200, _queue_counts())
+            elif path == "/queue":
+                self._send(200, _queue_counts())
 
-        elif path.startswith("/job/"):
-            client_id = path[len("/job/"):]
-            job_dir = JOBS_DIR / client_id
-            if not job_dir.is_dir():
-                self._send(404, {"error": f"no job found for client_id '{client_id}'"})
-                return
-            status = _job_status(job_dir)
-            if status == "complete":
-                self._send(200, json.loads((job_dir / "result.json").read_text()))
-            elif status == "error":
-                self._send(200, json.loads((job_dir / "error.json").read_text()))
-            else:
-                self._send(200, {"clientCode": client_id, "status": status})
-
-        elif path == "/jobs":
-            jobs = []
-            for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
-                if not job_dir.is_dir():
-                    continue
-                status = _job_status(job_dir)
-                entry = {"clientCode": job_dir.name, "status": status}
+            elif path.startswith("/job/"):
+                client_id = path[len("/job/"):]
+                job = storage.get_job(client_id)
+                if job is None:
+                    self._send(404, {"error": f"no job found for client_id '{client_id}'"})
+                    return
+                status = storage.job_status(job)
                 if status == "complete":
-                    try:
-                        result = json.loads((job_dir / "result.json").read_text())
+                    self._send(200, job["result_json"])
+                elif status == "error":
+                    self._send(200, job["error_json"])
+                else:
+                    self._send(200, {"clientCode": client_id, "status": status})
+
+            elif path == "/jobs":
+                jobs = []
+                for job in storage.list_jobs():
+                    status = storage.job_status(job)
+                    entry = {"clientCode": job["client_code"], "status": status}
+                    if status == "complete":
+                        result = job["result_json"]
                         entry["qualifying_lenders"] = len(result.get("qualifying_lenders", []))
                         entry["timestamp"] = result.get("timestamp")
                         entry["industry"] = result.get("applicant", {}).get("industry")
-                    except Exception:
-                        pass
-                jobs.append(entry)
-            self._send(200, {"total": len(jobs), "jobs": jobs})
+                    jobs.append(entry)
+                self._send(200, {"total": len(jobs), "jobs": jobs})
 
-        else:
-            self._send(404, {"error": "not found"})
+            else:
+                self._send(404, {"error": "not found"})
+        except Exception as exc:
+            self._send(503, {"error": f"storage unavailable: {exc}"})
 
     def do_DELETE(self):
         path = self.path.rstrip("/")
         if path.startswith("/job/"):
             client_id = path[len("/job/"):]
-            job_dir = JOBS_DIR / client_id
-            if not job_dir.is_dir():
+            try:
+                deleted = storage.delete_job(client_id)
+            except Exception as exc:
+                self._send(503, {"error": f"storage unavailable: {exc}"})
+                return
+            if not deleted:
                 self._send(404, {"error": f"no job found for client_id '{client_id}'"})
                 return
-            import shutil
-            shutil.rmtree(job_dir)
             print(f"[{client_id}] job deleted")
             self._send(200, {"clientCode": client_id, "deleted": True})
         else:
