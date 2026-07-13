@@ -8,14 +8,16 @@ Endpoints
 POST /application          Body: application OCR JSON
                            Returns: {"job_id": "...", "status": "received"}
 
-POST /bank-statement       Body: bank-statement OCR JSON (optionally include "job_id" to
-                           pair with a specific application; otherwise pairs with oldest
-                           pending app automatically)
-                           Returns: {"job_id": "...", "status": "processing"}
+POST /bank-statement       Body: ONE bank-statement OCR JSON (include "clientCode"/"client_id"
+                           to pair with an application). Each POST is one statement;
+                           statements accumulate per client. Analysis runs only once a
+                           client has an application AND >= 3 statements.
+                           Returns: {"clientCode": "...", "status": "processing"|"waiting_..."}
                            Gemini analysis runs in background; poll GET /job/<id> for result.
 
-GET  /job/<id>             Returns: {"job_id": "...", "status": "...", "result": {...}}
-                           status values: waiting_for_bank_statement | processing | complete | error
+GET  /job/<id>             Returns: {"clientCode": "...", "status": "...", "result": {...}}
+                           status values: waiting_for_application | waiting_for_bank_statements
+                                          | processing | complete | error
 
 GET  /queue                Returns: {"waiting": N, "processing": N, "complete": N, "error": N}
 GET  /health               Returns: {"status": "ok"}
@@ -54,6 +56,9 @@ import storage
 # Config
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
+
+# Minimum bank statements required before analysis runs (source of truth in storage.py).
+MIN_BANK_STATEMENTS = storage.MIN_BANK_STATEMENTS
 
 API_PORT = int(
     os.environ.get("PORT")
@@ -526,6 +531,47 @@ def extract_bs_metrics(bs: dict) -> dict:
     }
 
 
+def combine_statements(statements: list) -> dict:
+    """Average per-month metrics (revenue, deposits, balance, pos) and sum
+    count metrics (nsf, loan) across N statements, returning a single
+    summary_metrics-shaped dict that the extract_* / build_prompt functions
+    consume unchanged."""
+    metrics = [s.get("summary_metrics", s) if isinstance(s, dict) else {} for s in statements]
+
+    def _nums(key):
+        return [m[key] for m in metrics if isinstance(m.get(key), (int, float))]
+
+    def _avg(key):
+        vals = _nums(key)
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    def _sum(key):
+        vals = _nums(key)
+        return sum(vals) if vals else None
+
+    def _avg_revenue():
+        vals = []
+        for m in metrics:
+            v = m.get("total_revenue")
+            if not isinstance(v, (int, float)):
+                v = m.get("total_credits")
+            if isinstance(v, (int, float)):
+                vals.append(v)
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    combined = {
+        "total_revenue":     _avg_revenue(),
+        "total_deposits":    _avg("total_deposits"),
+        "avg_daily_balance": _avg("avg_daily_balance"),
+        "pos_count":         _avg("pos_count"),
+        "deposit_count":     _avg("deposit_count"),
+        "cash_flow":         _avg("cash_flow"),
+        "nsf_count":         _sum("nsf_count"),
+        "loan_count":        _sum("loan_count"),
+    }
+    return {"summary_metrics": combined, "statement_count": len(statements)}
+
+
 # ---------------------------------------------------------------------------
 # Gemini analysis
 # ---------------------------------------------------------------------------
@@ -650,18 +696,21 @@ def _post_webhook(payload: dict):
         return resp.status
 
 
-def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
-    """Runs in a background thread. Writes result/error via storage.py."""
+def run_analysis(job_id: str, app_raw: dict, statements: list):
+    """Runs in a background thread. Combines the accumulated statements into a
+    single metrics dict, then writes result/error via storage.py."""
     try:
+        bs_combined = combine_statements(statements)
+
         app = parse_ocr_app_json(app_raw)
-        monthly_rev = extract_monthly_rev(bs_raw)
+        monthly_rev = extract_monthly_rev(bs_combined)
         if monthly_rev is not None:
             app["monthly_revenue"] = monthly_rev
 
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=build_prompt(app, bs_raw),
+            contents=build_prompt(app, bs_combined),
             config={"response_mime_type": "application/json", "temperature": 0, "seed": 42},
         )
 
@@ -691,12 +740,12 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
                 "stacking_positions": app.get("stacking_positions", 0),
                 "loan_position": app.get("stacking_positions", 0) + 1,
             },
-            "bank_statement_metrics": extract_bs_metrics(bs_raw),
+            "bank_statement_metrics": extract_bs_metrics(bs_combined),
             **gemini_json,
         }
 
         storage.set_result(job_id, result)
-        print(f"[job {job_id[:8]}] complete — {len(gemini_json.get('qualifying_lenders', []))} qualifying lenders")
+        print(f"[job {job_id[:8]}] complete — {len(gemini_json.get('qualifying_lenders', []))} qualifying lenders ({bs_combined['statement_count']} statements)")
 
         try:
             status_code = _post_webhook(result)
@@ -716,10 +765,60 @@ def run_analysis(job_id: str, app_raw: dict, bs_raw: dict):
 
 
 # ---------------------------------------------------------------------------
+# Per-client analysis serialization
+# ---------------------------------------------------------------------------
+_registry_lock = threading.Lock()
+_client_locks: dict[str, threading.Lock] = {}
+_analysis_state: dict[str, dict] = {}  # client_id -> {"running": bool, "pending": bool}
+
+
+def _client_lock(client_id: str) -> threading.Lock:
+    """Return a stable lock for a client_id (created on first use)."""
+    with _registry_lock:
+        lock = _client_locks.get(client_id)
+        if lock is None:
+            lock = threading.Lock()
+            _client_locks[client_id] = lock
+        return lock
+
+
+def _maybe_launch_analysis(client_id: str) -> None:
+    """Launch analysis for a client unless one is already running (in which
+    case flag a single re-run). MUST be called while holding _client_lock(client_id)."""
+    state = _analysis_state.setdefault(client_id, {"running": False, "pending": False})
+    if state["running"]:
+        state["pending"] = True
+        return
+    state["running"] = True
+    threading.Thread(target=_analysis_loop, args=(client_id,), daemon=True).start()
+
+
+def _analysis_loop(client_id: str) -> None:
+    """Run analysis, re-running once for each statement that arrived while a
+    previous run was in progress. Always reloads the latest app + statements."""
+    while True:
+        try:
+            job = storage.get_job(client_id)
+            app_raw = job["app_json"] if job else None
+            statements = storage.load_statements(client_id)
+            run_analysis(client_id, app_raw, statements)
+        except Exception as exc:
+            print(f"[job {client_id[:8]}] analysis loop error: {exc}")
+
+        with _client_lock(client_id):
+            state = _analysis_state[client_id]
+            if state["pending"]:
+                state["pending"] = False
+                continue
+            state["running"] = False
+            return
+
+
+# ---------------------------------------------------------------------------
 # Job status helpers
 # ---------------------------------------------------------------------------
 def _queue_counts() -> dict:
-    counts = {"waiting_for_bank_statement": 0, "processing": 0, "complete": 0, "error": 0}
+    counts = {"waiting_for_bank_statements": 0, "processing": 0, "complete": 0, "error": 0}
     for job in storage.list_jobs():
         s = storage.job_status(job)
         if s in counts:
@@ -772,7 +871,9 @@ class _Handler(BaseHTTPRequestHandler):
                 elif status == "error":
                     self._send(200, job["error_json"])
                 else:
-                    self._send(200, {"clientCode": client_id, "status": status})
+                    self._send(200, {"clientCode": client_id, "status": status,
+                                     "received": storage.count_statements(job["bs_json"]),
+                                     "required": MIN_BANK_STATEMENTS})
 
             elif path == "/jobs":
                 jobs = []
@@ -829,21 +930,19 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "client_id is required"})
                     return
 
-                storage.upsert_app(client_id, data)
-                print(f"[{client_id}] application received")
+                with _client_lock(client_id):
+                    storage.upsert_app(client_id, data)
+                    print(f"[{client_id}] application received")
 
-                job = storage.get_job(client_id)
-                if job["bs_json"] is not None:
-                    print(f"[{client_id}] bank statement already present — launching analysis")
-                    threading.Thread(
-                        target=run_analysis,
-                        args=(client_id, data, job["bs_json"]),
-                        daemon=True,
-                    ).start()
-                    self._send(200, {"clientCode": client_id, "status": "processing",
-                                     "poll": f"GET /job/{client_id}"})
-                else:
-                    self._send(200, {"clientCode": client_id, "status": "received"})
+                    n = storage.count_statements(storage.get_job(client_id)["bs_json"])
+                    if n >= MIN_BANK_STATEMENTS:
+                        print(f"[{client_id}] {n} statements present — launching analysis")
+                        _maybe_launch_analysis(client_id)
+                        self._send(200, {"clientCode": client_id, "status": "processing",
+                                         "poll": f"GET /job/{client_id}"})
+                    else:
+                        self._send(200, {"clientCode": client_id, "status": "received",
+                                         "received": n, "required": MIN_BANK_STATEMENTS})
 
             elif path == "/bank-statement":
                 if not GEMINI_API_KEY:
@@ -854,21 +953,24 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "client_id is required"})
                     return
 
-                storage.upsert_bs(client_id, data)
-                print(f"[{client_id}] bank statement received")
+                with _client_lock(client_id):
+                    storage.append_bs(client_id, data)
+                    job = storage.get_job(client_id)
+                    n = storage.count_statements(job["bs_json"])
+                    has_app = job["app_json"] is not None
+                    print(f"[{client_id}] bank statement received ({n} total)")
 
-                job = storage.get_job(client_id)
-                if job["app_json"] is not None:
-                    print(f"[{client_id}] application already present — launching analysis")
-                    threading.Thread(
-                        target=run_analysis,
-                        args=(client_id, job["app_json"], data),
-                        daemon=True,
-                    ).start()
-                    self._send(200, {"clientCode": client_id, "status": "processing",
-                                     "poll": f"GET /job/{client_id}"})
-                else:
-                    self._send(200, {"clientCode": client_id, "status": "waiting_for_application"})
+                    if has_app and n >= MIN_BANK_STATEMENTS:
+                        print(f"[{client_id}] {n} statements present — launching analysis")
+                        _maybe_launch_analysis(client_id)
+                        self._send(200, {"clientCode": client_id, "status": "processing",
+                                         "poll": f"GET /job/{client_id}"})
+                    elif not has_app:
+                        self._send(200, {"clientCode": client_id, "status": "waiting_for_application",
+                                         "received": n, "required": MIN_BANK_STATEMENTS})
+                    else:
+                        self._send(200, {"clientCode": client_id, "status": "waiting_for_bank_statements",
+                                         "received": n, "required": MIN_BANK_STATEMENTS})
 
             else:
                 self._send(404, {"error": "unknown endpoint"})
@@ -880,16 +982,16 @@ class _Handler(BaseHTTPRequestHandler):
 # Entry point
 # ---------------------------------------------------------------------------
 def _recover_orphaned_jobs():
-    """On startup, re-run any jobs that have both documents but no result yet."""
+    """On startup, re-run any jobs that have an application and at least
+    MIN_BANK_STATEMENTS statements but no result yet (orphaned_jobs already
+    enforces the min-statement gate)."""
     recovered = 0
     for job in storage.orphaned_jobs():
         client_id = job["client_code"]
-        print(f"[{client_id}] recovering orphaned job — relaunching analysis")
-        threading.Thread(
-            target=run_analysis,
-            args=(client_id, job["app_json"], job["bs_json"]),
-            daemon=True,
-        ).start()
+        n = storage.count_statements(job["bs_json"])
+        print(f"[{client_id}] recovering orphaned job ({n} statements) — relaunching analysis")
+        with _client_lock(client_id):
+            _maybe_launch_analysis(client_id)
         recovered += 1
     if recovered:
         print(f"==> Recovered {recovered} orphaned job(s)")

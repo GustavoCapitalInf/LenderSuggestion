@@ -1,6 +1,7 @@
 """
 Integration tests for storage.py — run against a real Postgres database
-(no mocking: the thing being verified is SQL/psycopg correctness).
+(no mocking: the thing being verified is SQL/psycopg correctness, including
+the atomic append of bank statements into a jsonb array).
 
 Run: python tests/test_storage.py
 Requires DATABASE_URL to be set (env var or .streamlit/secrets.toml).
@@ -15,10 +16,7 @@ TEST_CODE = "STORAGE_TEST_job1"
 
 
 def cleanup():
-    # storage.delete_job() doesn't exist until Task 2 — use a raw query here
-    # so this test file is self-contained within Task 1.
-    with storage._connect() as conn:
-        conn.execute("DELETE FROM jobs WHERE client_code = %s", (TEST_CODE,))
+    storage.delete_job(TEST_CODE)
 
 
 def test_init_db_is_idempotent():
@@ -39,14 +37,38 @@ def test_upsert_app_creates_row():
     print("test_upsert_app_creates_row: PASS")
 
 
-def test_upsert_bs_does_not_clear_app_json():
+def test_append_bs_accumulates_into_array():
+    cleanup()
+    storage.append_bs(TEST_CODE, {"summary_metrics": {"total_revenue": 100}})
+    storage.append_bs(TEST_CODE, {"summary_metrics": {"total_revenue": 200}})
+    storage.append_bs(TEST_CODE, {"summary_metrics": {"total_revenue": 300}})
+    job = storage.get_job(TEST_CODE)
+    assert isinstance(job["bs_json"], list), f"bs_json must be a list, got {type(job['bs_json'])}"
+    assert len(job["bs_json"]) == 3, job["bs_json"]
+    assert job["bs_json"][0]["summary_metrics"]["total_revenue"] == 100
+    assert job["bs_json"][2]["summary_metrics"]["total_revenue"] == 300
+    assert storage.count_statements(job["bs_json"]) == 3
+    print("test_append_bs_accumulates_into_array: PASS")
+
+
+def test_load_statements_roundtrip():
+    cleanup()
+    assert storage.load_statements(TEST_CODE) == []
+    storage.append_bs(TEST_CODE, {"a": 1})
+    storage.append_bs(TEST_CODE, {"a": 2})
+    stmts = storage.load_statements(TEST_CODE)
+    assert [s["a"] for s in stmts] == [1, 2], stmts
+    print("test_load_statements_roundtrip: PASS")
+
+
+def test_append_bs_does_not_clear_app_json():
     cleanup()
     storage.upsert_app(TEST_CODE, {"foo": "bar"})
-    storage.upsert_bs(TEST_CODE, {"baz": "qux"})
+    storage.append_bs(TEST_CODE, {"baz": "qux"})
     job = storage.get_job(TEST_CODE)
-    assert job["app_json"] == {"foo": "bar"}, "upsert_bs must not touch app_json"
-    assert job["bs_json"] == {"baz": "qux"}
-    print("test_upsert_bs_does_not_clear_app_json: PASS")
+    assert job["app_json"] == {"foo": "bar"}, "append_bs must not touch app_json"
+    assert job["bs_json"] == [{"baz": "qux"}]
+    print("test_append_bs_does_not_clear_app_json: PASS")
 
 
 def test_get_job_returns_none_for_missing_code():
@@ -58,7 +80,8 @@ def test_get_job_returns_none_for_missing_code():
 def test_set_result_and_job_status_complete():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
-    storage.upsert_bs(TEST_CODE, {"b": 2})
+    for _ in range(3):
+        storage.append_bs(TEST_CODE, {"b": 2})
     storage.set_result(TEST_CODE, {"qualifying_lenders": []})
     job = storage.get_job(TEST_CODE)
     assert job["result_json"] == {"qualifying_lenders": []}
@@ -69,7 +92,7 @@ def test_set_result_and_job_status_complete():
 def test_set_error_and_job_status_error():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
-    storage.upsert_bs(TEST_CODE, {"b": 2})
+    storage.append_bs(TEST_CODE, {"b": 2})
     storage.set_error(TEST_CODE, {"error": "boom"})
     job = storage.get_job(TEST_CODE)
     assert job["error_json"] == {"error": "boom"}
@@ -77,36 +100,40 @@ def test_set_error_and_job_status_error():
     print("test_set_error_and_job_status_error: PASS")
 
 
-def test_job_status_transitions():
+def test_job_status_min3_gate():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
-    assert storage.job_status(storage.get_job(TEST_CODE)) == "waiting_for_bank_statement"
-    storage.upsert_bs(TEST_CODE, {"b": 2})
+    assert storage.job_status(storage.get_job(TEST_CODE)) == "waiting_for_bank_statements"
+    storage.append_bs(TEST_CODE, {"b": 1})
+    storage.append_bs(TEST_CODE, {"b": 2})
+    # 2 statements — still waiting, below the min-3 threshold
+    assert storage.job_status(storage.get_job(TEST_CODE)) == "waiting_for_bank_statements"
+    storage.append_bs(TEST_CODE, {"b": 3})
+    # 3 statements + app — now processing
     assert storage.job_status(storage.get_job(TEST_CODE)) == "processing"
-    print("test_job_status_transitions: PASS")
+    print("test_job_status_min3_gate: PASS")
 
 
 def test_job_status_waiting_for_application():
     cleanup()
-    storage.upsert_bs(TEST_CODE, {"b": 2})
+    for _ in range(3):
+        storage.append_bs(TEST_CODE, {"b": 2})
     assert storage.job_status(storage.get_job(TEST_CODE)) == "waiting_for_application"
     print("test_job_status_waiting_for_application: PASS")
 
 
-def test_job_status_unknown():
-    assert storage.job_status({}) == "unknown"
-    print("test_job_status_unknown: PASS")
-
-
-def test_reupsert_app_clears_result():
+def test_reupsert_app_clears_result_keeps_statements():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
-    storage.upsert_bs(TEST_CODE, {"b": 2})
+    for _ in range(3):
+        storage.append_bs(TEST_CODE, {"b": 2})
     storage.set_result(TEST_CODE, {"qualifying_lenders": []})
     storage.upsert_app(TEST_CODE, {"a": 2})  # resubmission
     job = storage.get_job(TEST_CODE)
     assert job["result_json"] is None, "resubmitting the application must clear result_json"
-    print("test_reupsert_app_clears_result: PASS")
+    # statements are preserved across an application resubmission
+    assert storage.count_statements(job["bs_json"]) == 3
+    print("test_reupsert_app_clears_result_keeps_statements: PASS")
 
 
 def test_delete_job_rowcount_semantics():
@@ -117,37 +144,44 @@ def test_delete_job_rowcount_semantics():
     print("test_delete_job_rowcount_semantics: PASS")
 
 
-def test_list_jobs_and_orphaned_jobs():
+def test_orphaned_jobs_requires_min3():
     cleanup()
     storage.upsert_app(TEST_CODE, {"a": 1})
-    storage.upsert_bs(TEST_CODE, {"b": 2})
-
-    all_codes = [j["client_code"] for j in storage.list_jobs()]
-    assert TEST_CODE in all_codes
-
-    orphaned_codes = [j["client_code"] for j in storage.orphaned_jobs()]
-    assert TEST_CODE in orphaned_codes, "job with app+bs but no result/error is orphaned"
-
+    storage.append_bs(TEST_CODE, {"b": 1})
+    storage.append_bs(TEST_CODE, {"b": 2})
+    # 2 statements — NOT orphaned yet (below min-3)
+    assert TEST_CODE not in [j["client_code"] for j in storage.orphaned_jobs()]
+    storage.append_bs(TEST_CODE, {"b": 3})
+    # 3 statements + app, no result — now orphaned
+    assert TEST_CODE in [j["client_code"] for j in storage.orphaned_jobs()]
     storage.set_result(TEST_CODE, {"qualifying_lenders": []})
-    orphaned_codes = [j["client_code"] for j in storage.orphaned_jobs()]
-    assert TEST_CODE not in orphaned_codes, "job with a result is no longer orphaned"
-    print("test_list_jobs_and_orphaned_jobs: PASS")
+    assert TEST_CODE not in [j["client_code"] for j in storage.orphaned_jobs()]
+    print("test_orphaned_jobs_requires_min3: PASS")
+
+
+def test_list_jobs_includes_code():
+    cleanup()
+    storage.upsert_app(TEST_CODE, {"a": 1})
+    assert TEST_CODE in [j["client_code"] for j in storage.list_jobs()]
+    print("test_list_jobs_includes_code: PASS")
 
 
 if __name__ == "__main__":
     try:
         test_init_db_is_idempotent()
         test_upsert_app_creates_row()
-        test_upsert_bs_does_not_clear_app_json()
+        test_append_bs_accumulates_into_array()
+        test_load_statements_roundtrip()
+        test_append_bs_does_not_clear_app_json()
         test_get_job_returns_none_for_missing_code()
         test_set_result_and_job_status_complete()
         test_set_error_and_job_status_error()
-        test_job_status_transitions()
+        test_job_status_min3_gate()
         test_job_status_waiting_for_application()
-        test_job_status_unknown()
-        test_reupsert_app_clears_result()
+        test_reupsert_app_clears_result_keeps_statements()
         test_delete_job_rowcount_semantics()
-        test_list_jobs_and_orphaned_jobs()
+        test_orphaned_jobs_requires_min3()
+        test_list_jobs_includes_code()
     finally:
         cleanup()
     print("\nALL TESTS PASSED")

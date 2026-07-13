@@ -3,6 +3,10 @@ Job storage backed by Postgres (Neon). Replaces the old jobs/<clientCode>/*.json
 file layout so job data survives Render free-tier restarts (no persistent
 disk, spins down on idle).
 
+Bank statements accumulate: bs_json holds a JSON *array* of statement dicts.
+Analysis is gated until a client has an application AND at least
+MIN_BANK_STATEMENTS statements (see job_status / orphaned_jobs).
+
 Requires a DATABASE_URL environment variable (a standard Postgres
 connection string), falling back to .streamlit/secrets.toml the same way
 app.py loads GEMINI_API_KEY.
@@ -16,6 +20,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 BASE_DIR = Path(__file__).parent
+
+# Minimum number of bank statements required before analysis runs.
+MIN_BANK_STATEMENTS = 3
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if not DATABASE_URL:
@@ -46,6 +53,35 @@ def init_db() -> None:
         """)
 
 
+# ---------------------------------------------------------------------------
+# Bank-statement list helpers
+# ---------------------------------------------------------------------------
+def _as_statement_list(bs_json) -> list:
+    """Normalize a bs_json column value to a list of statement dicts.
+    None -> []; a legacy single object -> a 1-element list; a list -> as-is."""
+    if bs_json is None:
+        return []
+    if isinstance(bs_json, list):
+        return bs_json
+    return [bs_json]
+
+
+def count_statements(bs_json) -> int:
+    """Total number of statements represented by a bs_json value (sums each
+    entry's statement_count, defaulting to 1 per entry)."""
+    total = 0
+    for s in _as_statement_list(bs_json):
+        c = s.get("statement_count", 1) if isinstance(s, dict) else 1
+        total += c if isinstance(c, int) and c > 0 else 1
+    return total
+
+
+def load_statements(client_code: str) -> list:
+    """Return the client's accumulated statements as a list (empty if none)."""
+    job = get_job(client_code)
+    return _as_statement_list(job["bs_json"]) if job else []
+
+
 def upsert_app(client_code: str, app_json: dict) -> None:
     """Insert or update a job's app_json. Clears result_json/error_json so a
     resubmitted application starts fresh (matches prior file-based behavior)."""
@@ -61,16 +97,24 @@ def upsert_app(client_code: str, app_json: dict) -> None:
         """, (client_code, Json(app_json)))
 
 
-def upsert_bs(client_code: str, bs_json: dict) -> None:
-    """Insert or update a job's bs_json."""
+def append_bs(client_code: str, bs_json: dict) -> None:
+    """Append one bank statement to the client's bs_json array. Atomic — a
+    single UPDATE using jsonb concatenation, so concurrent appends don't lose
+    statements. A legacy single-object bs_json is promoted to an array first."""
     with _connect() as conn:
         conn.execute("""
             INSERT INTO jobs (client_code, bs_json, updated_at)
             VALUES (%s, %s, now())
             ON CONFLICT (client_code) DO UPDATE
-                SET bs_json = EXCLUDED.bs_json,
+                SET bs_json = (
+                        CASE
+                            WHEN jobs.bs_json IS NULL THEN '[]'::jsonb
+                            WHEN jsonb_typeof(jobs.bs_json) = 'array' THEN jobs.bs_json
+                            ELSE jsonb_build_array(jobs.bs_json)
+                        END
+                    ) || EXCLUDED.bs_json,
                     updated_at = now()
-        """, (client_code, Json(bs_json)))
+        """, (client_code, Json([bs_json])))
 
 
 def get_job(client_code: str) -> dict | None:
@@ -118,8 +162,10 @@ def list_jobs() -> list[dict]:
 
 
 def orphaned_jobs() -> list[dict]:
-    """Jobs with both app_json and bs_json present but no result/error yet
-    (used to relaunch analysis on startup after an unclean shutdown)."""
+    """Jobs with an application and at least MIN_BANK_STATEMENTS statements but
+    no result/error yet (used to relaunch analysis on startup after an unclean
+    shutdown). The min-statement count is filtered in Python since it sums each
+    entry's statement_count."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT client_code, app_json, bs_json, result_json, error_json, updated_at "
@@ -127,22 +173,25 @@ def orphaned_jobs() -> list[dict]:
             "WHERE app_json IS NOT NULL AND bs_json IS NOT NULL "
             "AND result_json IS NULL AND error_json IS NULL"
         ).fetchall()
-        return [dict(r) for r in rows]
+    return [
+        dict(r) for r in rows
+        if count_statements(dict(r)["bs_json"]) >= MIN_BANK_STATEMENTS
+    ]
 
 
 def job_status(row: dict) -> str:
-    """Derive a status string from a job row dict, mirroring the old
-    file-existence-based _job_status()."""
+    """Derive a status string from a job row dict. Analysis is gated on having
+    an application AND at least MIN_BANK_STATEMENTS statements."""
     has_app = row.get("app_json") is not None
-    has_bs = row.get("bs_json") is not None
+    n = count_statements(row.get("bs_json"))
     if row.get("result_json") is not None:
         return "complete"
     if row.get("error_json") is not None:
         return "error"
-    if has_app and has_bs:
+    if has_app and n >= MIN_BANK_STATEMENTS:
         return "processing"
-    if has_bs and not has_app:
+    if n > 0 and not has_app:
         return "waiting_for_application"
-    if has_app and not has_bs:
-        return "waiting_for_bank_statement"
+    if has_app:
+        return "waiting_for_bank_statements"
     return "unknown"
